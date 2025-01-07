@@ -10,7 +10,7 @@ fn usage() {
     eprintln!("usage: {} -p [pid]\n       {} [path]", &args[0], &args[0]);
 }
 
-fn attach(args: &Vec::<String>) -> Process {
+fn attach(args: &Vec::<String>) -> Result<Process> {
     let res: Result<Process>;
     if args.len() == 3 && args[1] == "-p" {
         let Ok(pid) = args[2].parse::<i32>() else {
@@ -18,15 +18,15 @@ fn attach(args: &Vec::<String>) -> Process {
         };
         res = Process::attach(pid);
     } else {
-        res = Process::launch(&args[1]);
+        res = Process::launch_args(
+            &args[1],
+            (2..args.len()).map(|idx| args[idx].clone()).collect(),
+            true
+        );
     }
-    if res.is_err() {
-        panic!("error attaching: {}", res.err().unwrap());
-    }
-    return res.unwrap();
+    res
 }
 
-// TODO: error type
 fn handle_command(p: &mut Process, cmd: &str) -> Result<()> {
     let mut split = cmd.split(' ');
     let command = split.nth(0);
@@ -34,9 +34,13 @@ fn handle_command(p: &mut Process, cmd: &str) -> Result<()> {
         return error("could not read command");
     };
     if "continue".starts_with(command) {
-        p.resume();
+        p.resume()?;
         let reason = p.wait_on_signal();
-        println!("{}", &reason);
+        if let Ok(reason) = reason {
+            println!("{}", &reason);
+        } else {
+            return Err(reason.err().unwrap());
+        }
     } else {
         return error(&format!("unrecognized command: {}", command));
     }
@@ -69,7 +73,7 @@ fn main_loop(mut p: Process, mut cl: Copperline) {
         }
     }
 }
- 
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 || args.len() > 3 {
@@ -77,7 +81,10 @@ fn main() {
         return;
     }
     let process = attach(&args);
+    let Ok(process) = process else {
+        println!("{}", process.err().unwrap());
+        return;
+    };
     println!("pid: {}", process.pid.as_raw());
-    let mut cl = Copperline::new();
-    main_loop(process, cl);
+    main_loop(process, Copperline::new());
 }
