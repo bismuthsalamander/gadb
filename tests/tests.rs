@@ -67,7 +67,10 @@ fn resume_success() {
         let mut proc2 = proc2.unwrap();
         proc2.res();
         let stat = get_process_status(proc2.pid);
-        assert!(stat == Ok('R') || stat == Ok('S'));
+        if stat != Ok('R') && stat != Ok('S') {
+            dbg!(&stat);
+            assert!(stat == Ok('R') || stat == Ok('S'));
+        }
     }
 }
 #[test]
