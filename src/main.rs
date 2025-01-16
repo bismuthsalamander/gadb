@@ -1,8 +1,6 @@
 use copperline::Copperline;
 use gadb::{
-    Process,
-    Result,
-    error
+    error, parse_float, parse_u64, parse_vec, register_by_id, register_by_name, Process, RegisterFormat, RegisterType, Result, REGISTER_INFOS
 };
 
 fn usage() {
@@ -21,15 +19,104 @@ fn attach(args: &Vec::<String>) -> Result<Process> {
         res = Process::launch_args(
             &args[1],
             (2..args.len()).map(|idx| args[idx].clone()).collect(),
-            true
+            true,
+            None
         );
     }
     res
 }
 
+fn print_help(args: &Vec<&str>) {
+    if args.len() <= 1 {
+        println!("Available comamnds:
+
+    continue
+    register
+");
+    } else {
+        if "register".starts_with(args[1]) {
+            println!("Usage: register (subcommand)
+
+Available subcommands:
+
+    read
+    read <register>
+    read all
+    write <register> <value>");
+        }
+    }
+}
+
+fn handle_register_command(p: &mut Process, args: &Vec<&str>) {
+    if args.len() < 2 {
+        return print_help(args);
+    }
+    if "read".starts_with(args[1]) {
+        if args.len() == 2 || "all".starts_with(args[2]) {
+            for ri in REGISTER_INFOS.iter() {
+                if ri.rtype != RegisterType::Gpr || ri.dwarf_id == -1 {
+                    continue;
+                }
+                let val = p.regs().read(ri);
+                println!("{}:\t{}", ri.name, val.format(ri));
+            }
+        } else {
+            let Ok(ri) = register_by_name(args[2]) else {
+                return println!("Unrecognized register {}", args[2]);
+            };
+            let val = p.regs().read(ri);
+            println!("{}:\t{}", ri.name, val.format(ri));
+        }
+    } else if "write".starts_with(args[1]) {
+        if args.len() != 4 {
+            return print_help(args);
+        }
+        let Ok(ri) = register_by_name(args[2]) else {
+            return println!("Unrecognized register {}", args[2]);
+        };
+        // TODO: this repetition will all go away after I fix how ValUnion is used
+        match ri.format {
+            RegisterFormat::Uint => {
+                let val = parse_u64(&args[3]);
+                if val.is_err() {
+                    return println!("{}", val.err().unwrap());
+                }
+                p.write_reg(ri, val.unwrap().into());
+            },
+            RegisterFormat::Double => {
+                let val = parse_float(&args[3]);
+                if val.is_err() {
+                    return println!("{}", val.err().unwrap());
+                }
+                p.write_reg(ri, val.unwrap().into());
+            },
+            RegisterFormat::LongDouble => {
+                return println!("not supported yet");
+            },
+            RegisterFormat::Vector => {
+                if ri.size == 8 {
+                    let val: Result<[u8; 8]> = parse_vec(&args[3]);
+                    if val.is_err() {
+                        return println!("{}", val.err().unwrap());
+                    }
+                    p.write_reg(ri, val.unwrap().into());
+                } else if ri.size == 16 {
+                    let val: Result<[u8; 16]> = parse_vec(&args[3]);
+                    if val.is_err() {
+                        return println!("{}", val.err().unwrap());
+                    }
+                    p.write_reg(ri, val.unwrap().into());
+                }
+                
+            },
+        }
+    }
+}
+
 fn handle_command(p: &mut Process, cmd: &str) -> Result<()> {
     let mut split = cmd.split(' ');
-    let command = split.nth(0);
+    let args: Vec<&str> = split.collect();
+    let command = args.get(0);
     let Some(command) = command else {
         return error("could not read command");
     };
@@ -41,6 +128,10 @@ fn handle_command(p: &mut Process, cmd: &str) -> Result<()> {
         } else {
             return Err(reason.err().unwrap());
         }
+    } else if "help".starts_with(command) {
+        print_help(&args);
+    } else if "registers".starts_with(command) {
+        handle_register_command(p, &args);
     } else {
         return error(&format!("unrecognized command: {}", command));
     }

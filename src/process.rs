@@ -114,14 +114,14 @@ pub struct Process {
 
 impl Process {
     pub fn launch(cmd: &str) -> Result<Self> {
-        return Self::launch_args(cmd, Vec::new(), true);
+        return Self::launch_args(cmd, Vec::new(), true, None);
     }
 
     pub fn launch_noattach(cmd: &str) -> Result<Self> {
-        return Self::launch_args(cmd, Vec::new(), false);
+        return Self::launch_args(cmd, Vec::new(), false, None);
     }
 
-    pub fn launch_args(cmd: &str, args: Vec::<String>, attach: bool) -> Result<Self> {
+    pub fn launch_args(cmd: &str, args: Vec::<String>, attach: bool, stdout: Option<std::os::fd::RawFd>) -> Result<Self> {
         let Ok(cmd_c) = CString::new(cmd) else {
             return error("could not read cmd");
         };
@@ -141,6 +141,13 @@ impl Process {
             pipe.close_read();
             if attach && ptrace::traceme().is_err() {
                 exit_with_error(&mut pipe, &"error calling PTRACE_TRACEME");
+            }
+            if let Some(raw_fd) = stdout {
+                unsafe {
+                    if libc::dup2(raw_fd, libc::STDOUT_FILENO) < 0 {
+                        exit_with_error(&mut pipe, &"error calling dup2");
+                    }
+                }
             }
 
             let mut args_cstr: Vec<CString> = args.iter().map(|s| CString::new(s.clone()).unwrap()).collect();
@@ -224,7 +231,7 @@ impl Process {
         Ok(())
     }
 
-    fn get_fpregs(&self) -> Result<user_fpregs_struct> {
+    pub fn get_fpregs(&self) -> Result<user_fpregs_struct> {
         //ptrace_get_data::<user_regs_struct>(Request::PTRACE_GETREGS, pid)
         let mut data = std::mem::MaybeUninit::<user_fpregs_struct>::uninit();
         let res = unsafe {
@@ -249,7 +256,7 @@ impl Process {
         if let Ok(fpregs) = self.get_fpregs() {
             self.registers.userdata.i387 = fpregs;
         }
-        //todo: read debug registers
+        
         for (i, id) in DR_IDS.iter().enumerate() {
             let ri = register_by_id(id).unwrap();
             if let Ok(val) = ptrace::read_user(self.pid, ri.offset as *mut libc::c_void) {
@@ -264,22 +271,24 @@ impl Process {
     pub fn write_reg(&mut self, ri: &RegInfo, val: ValUnion) {
         self.registers.write(ri, val);
         if ri.rtype == RegisterType::Fpr {
-            self.write_fprs(&self.registers.userdata.i387.clone());
+            let _ = self.write_fprs(self.registers.userdata.i387.clone());
             return;
         }
         let offset = ri.offset & !0b111;
         let bytes = self.registers.get_clong_at(offset);
-        ptrace::write_user(self.pid, ri.offset as *mut libc::c_void, bytes);
+        let _ = ptrace::write_user(self.pid, offset as *mut libc::c_void, bytes);
     }
 
-    pub fn write_fprs(&mut self, fpregs: &user_fpregs_struct) -> Result<()> {
+    pub fn write_fprs(&mut self, fpregs: user_fpregs_struct) -> Result<()> {
         let res = unsafe {
-            libc::ptrace(
-                ptrace::Request::PTRACE_SETREGS as libc::c_uint,
+            let res = libc::ptrace(
+                ptrace::Request::PTRACE_SETFPREGS as libc::c_uint,
                 libc::pid_t::from(self.pid),
                 std::ptr::null_mut::<libc::c_void>(),
-                &self.registers.userdata.i387 as *const user_fpregs_struct as *const libc::c_void,
-            )
+                &fpregs as *const user_fpregs_struct as *const libc::c_void,
+            );
+            dbg!(&res);
+            res
         };
         if nix::errno::Errno::result(res).is_err() {
             return error("error in write_fprs");
@@ -292,6 +301,10 @@ impl Process {
             return error("error calling PTRACE_SETREGS");
         }
         Ok(())
+    }
+
+    pub fn regs(&self) -> &Registers {
+        &self.registers
     }
 }
 

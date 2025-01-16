@@ -4,20 +4,15 @@ mod pipe;
 mod register_info;
 mod registers;
 mod process;
+mod parsing;
 
 pub use {
     pipe::*,
     register_info::*,
     registers::*,
-    process::*
+    process::*,
+    parsing::*
 };
-
-use std::process::exit;
-
-use nix::sys::{
-    signal::Signal,
-};
-use nix::unistd::Pid;
 
 pub type Result<T> = std::result::Result<T, GadbErr>;
 

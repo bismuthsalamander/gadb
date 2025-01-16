@@ -26,12 +26,12 @@ impl Pipe {
     }
 
     //TODO: error handling
-    fn get_read(&self) -> RawFd {
+    pub fn get_read(&self) -> RawFd {
         self.fds[Self::READ_FD].as_ref().unwrap().as_raw_fd()
     }
 
     //TODO: error handling
-    fn get_write(&self) -> &OwnedFd {
+    pub fn get_write(&self) -> &OwnedFd {
         self.fds[Self::WRITE_FD].as_ref().unwrap()
     }
 
@@ -53,6 +53,15 @@ impl Pipe {
 
     pub fn close_write(&mut self) {
         self.fds[Self::WRITE_FD] = None;
+    }
+
+    pub fn read_string(&mut self) -> Result<String> {
+        let vec = self.read()?;
+        let s = String::from_utf8(vec);
+        if s.is_err() {
+            return error("error converting text to string");
+        }
+        Ok(s.unwrap())
     }
 
     pub fn read(&mut self) -> Result<Vec::<u8>> {

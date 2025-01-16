@@ -1,9 +1,3 @@
-use libc::{
-    user,
-    user_regs_struct,
-    user_fpregs_struct
-};
-
 use std::mem;
 
 use crate::{
@@ -441,10 +435,10 @@ pub fn register_by_id(id: &RegisterId) -> Result<&'static RegInfo> {
     register_find_by(|ri| ri.id == *id)
 }
 
-fn register_by_name(n: &str) -> Result<&'static RegInfo> {
+pub fn register_by_name(n: &str) -> Result<&'static RegInfo> {
     register_find_by(|ri| ri.name == n)
 }
 
-fn register_by_dwarf(id: i32) -> Result<&'static RegInfo> {
+pub fn register_by_dwarf(id: i32) -> Result<&'static RegInfo> {
     register_find_by(|ri| ri.dwarf_id == id)
 }
