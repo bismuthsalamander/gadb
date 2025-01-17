@@ -4,14 +4,13 @@ use crate::{
 };
 
 pub fn parse_vec<const N: usize>(s: &str) -> Result<[u8; N]> {
-    let mut out = [0u8; N];
     if s.len() == 0 || !s.starts_with('[') || !s.ends_with(']') {
         return error("could not parse vec");
     }
     let parts = s[1..s.len()-1].split(',');
 
     let v: Vec<_> = parts.map(|str| str.parse::<u8>()).collect();
-    if v.len() < out.len() || v.iter().any(|val| val.is_err()) {
+    if v.len() < N || v.iter().any(|val| val.is_err()) {
         return error("could not parse vec");
     }
     let v: Vec<u8> = v.iter().map(|res| *res.as_ref().unwrap()).collect();

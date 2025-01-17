@@ -268,13 +268,13 @@ impl Process {
         Ok(())
     }
 
-    pub fn write_reg(&mut self, ri: &RegInfo, val: ValUnion) {
-        self.registers.write(ri, val);
-        if ri.rtype == RegisterType::Fpr {
+    pub fn write_reg(&mut self, rv: &RValue) {
+        self.registers.write(rv);
+        if rv.ri.rtype == RegisterType::Fpr {
             let _ = self.write_fprs(self.registers.userdata.i387.clone());
             return;
         }
-        let offset = ri.offset & !0b111;
+        let offset = rv.ri.offset & !0b111;
         let bytes = self.registers.get_clong_at(offset);
         let _ = ptrace::write_user(self.pid, offset as *mut libc::c_void, bytes);
     }

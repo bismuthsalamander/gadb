@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::os::fd::AsRawFd;
 use extended::Extended;
 
+use gadb::RValue;
 use nix::{
     unistd::Pid,
     sys::signal
@@ -17,9 +18,7 @@ use gadb::{
     Result,
     error,
     Pipe,
-    ValUnion,
     RegisterId,
-    register_by_id,
     extend_vec
 };
 
@@ -112,29 +111,34 @@ fn write_register() {
     pipe.close_write();
     proc.resume();
     proc.wait_on_signal();
-    let val: u64 = 0x1badd00d2badf00d;
+    let val = RValue::from_id(0x1badd00d2badf00du64, RegisterId::rsi);
     let str = format!("{:#x}", val);
-    proc.write_reg(register_by_id(&RegisterId::rsi).unwrap(), val.into());
+    proc.write_reg(&val);
+        // register_by_id(&RegisterId::rsi).unwrap(), val.into());
     proc.resume();
     proc.wait_on_signal();
     assert!(pipe.read_string().unwrap() == str);
 
-    let val: u64 = 0x1fa1afe12fa1afe1;
-    let str = format!("{:#x}", val);
-    proc.write_reg(register_by_id(&RegisterId::mm0).unwrap(), val.into());
+    let val = RValue::from_id(0x1fa1afe12fa1afe1u64, RegisterId::mm0);
+    let str = format!("{:#x}", val.read_as::<u64>());
+    proc.write_reg(&val);
     proc.resume();
     proc.wait_on_signal();
-    assert!(pipe.read_string().unwrap() == str);
-
-    let val: f64 = 76.54;
-    let str = format!("{0:.2}", val);
-    proc.write_reg(register_by_id(&RegisterId::xmm0).unwrap(), val.into());
-    proc.resume();
-    proc.wait_on_signal();
+    dbg!(&str);
+    dbg!(&val.ri.id);
     let out = pipe.read_string().unwrap();
     dbg!(&out);
-    dbg!(&str);
     assert!(out == str);
+
+    let val = RValue::from_id(76.54, RegisterId::xmm0);
+    let from_val = format!("{0:.2}", val.read_as::<f64>());
+    proc.write_reg(&val);
+    proc.resume();
+    proc.wait_on_signal();
+    let from_child = pipe.read_string().unwrap();
+    dbg!(&from_child);
+    dbg!(&from_val);
+    assert!(from_child == from_val);
 
     let val: f64 = 42.24;
     let str = format!("{:.2}", val);
@@ -142,11 +146,11 @@ fn write_register() {
     let val_vec16: [u8; 16] = extend_vec(val_ext.to_le_bytes());
     let res = proc.get_fpregs().unwrap();
     println!("cwd: {0:b}\nftw: {1:b}\nst0: {2:x}\nst1: {3:x}\nst2: {4:x}\nst3: {5:x}", res.swd, res.ftw, res.st_space[0], res.st_space[1], res.st_space[2], res.st_space[3]);
-    proc.write_reg(register_by_id(&RegisterId::st0).unwrap(), val_vec16.into());
+    proc.write_reg(&RValue::from_id(val_vec16, RegisterId::st0));
     let fsw: u16 = 0b0011100000000000;
-    proc.write_reg(register_by_id(&RegisterId::fsw).unwrap(), fsw.into());
+    proc.write_reg(&RValue::from_id(fsw, RegisterId::fsw));
     let ftw: u16 = 0b0011111111111111;
-    proc.write_reg(register_by_id(&RegisterId::ftw).unwrap(), ftw.into());
+    proc.write_reg(&RValue::from_id(ftw, RegisterId::ftw));
     let res = proc.get_fpregs().unwrap();
     println!("cwd: {0:b}\nftw: {1:b}\nst0: {2:x}\nst1: {3:x}\nst2: {4:x}\nst3: {5:x}", res.swd, res.ftw, res.st_space[0], res.st_space[1], res.st_space[2], res.st_space[3]);
     proc.resume();
@@ -193,6 +197,5 @@ fn read_register() {
     proc.resume();
     proc.wait_on_signal();
     let bytes = Into::<Extended>::into(magic_double).to_le_bytes();
-    let arr = proc.regs().read_as_id::<[u8; 16]>(&RegisterId::st0);
     assert!(proc.regs().read_as_id::<[u8;16]>(&RegisterId::st0)[..10] == bytes);
 }

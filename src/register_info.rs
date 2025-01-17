@@ -7,7 +7,7 @@ use crate::{
 };
 
 #[allow(non_camel_case_types)]
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum RegisterId {
     rax,
     rbx,

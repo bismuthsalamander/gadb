@@ -1,6 +1,6 @@
 use copperline::Copperline;
 use gadb::{
-    error, parse_float, parse_u64, parse_vec, register_by_id, register_by_name, Process, RegisterFormat, RegisterType, Result, REGISTER_INFOS
+    error, parse_float, parse_u64, parse_vec, register_by_name, Process, RValue, RegisterFormat, RegisterType, Result, REGISTER_INFOS
 };
 
 fn usage() {
@@ -58,14 +58,14 @@ fn handle_register_command(p: &mut Process, args: &Vec<&str>) {
                     continue;
                 }
                 let val = p.regs().read(ri);
-                println!("{}:\t{}", ri.name, val.format(ri));
+                println!("{}:\t{}", ri.name, val);
             }
         } else {
             let Ok(ri) = register_by_name(args[2]) else {
                 return println!("Unrecognized register {}", args[2]);
             };
             let val = p.regs().read(ri);
-            println!("{}:\t{}", ri.name, val.format(ri));
+            println!("{}:\t{}", ri.name, val);
         }
     } else if "write".starts_with(args[1]) {
         if args.len() != 4 {
@@ -74,47 +74,46 @@ fn handle_register_command(p: &mut Process, args: &Vec<&str>) {
         let Ok(ri) = register_by_name(args[2]) else {
             return println!("Unrecognized register {}", args[2]);
         };
+
+
         // TODO: this repetition will all go away after I fix how ValUnion is used
-        match ri.format {
+        let val = match ri.format {
             RegisterFormat::Uint => {
-                let val = parse_u64(&args[3]);
-                if val.is_err() {
-                    return println!("{}", val.err().unwrap());
-                }
-                p.write_reg(ri, val.unwrap().into());
+                let Ok(v) = parse_u64(&args[3]) else {
+                    return println!("could not parse value");
+                };
+                RValue::from(v, ri)
             },
             RegisterFormat::Double => {
-                let val = parse_float(&args[3]);
-                if val.is_err() {
-                    return println!("{}", val.err().unwrap());
-                }
-                p.write_reg(ri, val.unwrap().into());
+                let Ok(v) = parse_float(&args[3]) else {
+                    return println!("could not parse value");
+                };
+                RValue::from(v, ri)
             },
             RegisterFormat::LongDouble => {
                 return println!("not supported yet");
             },
             RegisterFormat::Vector => {
                 if ri.size == 8 {
-                    let val: Result<[u8; 8]> = parse_vec(&args[3]);
-                    if val.is_err() {
-                        return println!("{}", val.err().unwrap());
-                    }
-                    p.write_reg(ri, val.unwrap().into());
-                } else if ri.size == 16 {
-                    let val: Result<[u8; 16]> = parse_vec(&args[3]);
-                    if val.is_err() {
-                        return println!("{}", val.err().unwrap());
-                    }
-                    p.write_reg(ri, val.unwrap().into());
+                    let Ok(v) = parse_vec::<8>(&args[3]) else {
+                        return println!("could not parse value");
+                    };
+                    RValue::from(v, ri)
+                } else {
+                    let Ok(v) = parse_vec::<16>(&args[3]) else {
+                        return println!("could not parse value");
+                    };
+                    RValue::from(v, ri)
                 }
                 
             },
-        }
+        };
+        p.write_reg(&val);
     }
 }
 
 fn handle_command(p: &mut Process, cmd: &str) -> Result<()> {
-    let mut split = cmd.split(' ');
+    let split = cmd.split(' ');
     let args: Vec<&str> = split.collect();
     let command = args.get(0);
     let Some(command) = command else {
