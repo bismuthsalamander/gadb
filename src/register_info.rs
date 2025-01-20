@@ -7,7 +7,7 @@ use crate::{
 };
 
 #[allow(non_camel_case_types)]
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum RegisterId {
     rax,
     rbx,
@@ -431,8 +431,8 @@ fn register_find_by(f: impl Fn(&&RegInfo) -> bool) -> Result<&'static RegInfo> {
     Ok(res.unwrap())
 }
 
-pub fn register_by_id(id: &RegisterId) -> Result<&'static RegInfo> {
-    register_find_by(|ri| ri.id == *id)
+pub fn register_by_id(id: RegisterId) -> Result<&'static RegInfo> {
+    register_find_by(|ri| ri.id == id)
 }
 
 pub fn register_by_name(n: &str) -> Result<&'static RegInfo> {

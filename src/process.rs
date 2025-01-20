@@ -1,3 +1,4 @@
+use crate::breakpoints::{BreakSite, VirtAddr, StopPoint};
 use crate::{
     Result,
     error,
@@ -10,8 +11,8 @@ use crate::{
 
 use nix::{
     sys::wait,
+    sys::personality,
     sys::signal,
-    sys::signal::Signal,
     sys::ptrace,
     unistd::Pid,
 };
@@ -23,15 +24,18 @@ use libc::{
     user_fpregs_struct
 };
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::process::exit;
+
+const INT3: u8 = 0xcc;
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum ProcessState {
     Stopped,
     Running,
     Exited,
-    Terminated    
+    Terminated
 }
 
 impl std::fmt::Display for ProcessState {
@@ -45,9 +49,9 @@ impl std::fmt::Display for ProcessState {
     }
 }
 
-#[derive(Debug)]
+#[derive(PartialEq, Debug)]
 pub enum StopInfo {
-    Signal(Signal),
+    Signal(signal::Signal),
     ExitCode(i32)
 }
 
@@ -109,7 +113,49 @@ pub struct Process {
     pub autoterm: bool,
     pub attached: bool,
     pub state: ProcessState,
-    registers: Registers
+    registers: Registers,
+    breaksites: HashMap::<usize, BreakSite>,
+    next_breaksite_id: usize
+}
+
+trait BreakSiteId {
+    fn find_breaksite<'a>(&self, p: &'a Process) -> Option<&'a BreakSite>;
+    fn find_breaksite_mut<'a>(&self, p: &'a mut Process) -> Option<&'a mut BreakSite>;
+}
+
+impl BreakSiteId for &BreakSite {
+    fn find_breaksite<'a>(&self, p: &'a Process) -> Option<&'a BreakSite> {
+        p.breaksite_by_id(self.id)
+    }
+    fn find_breaksite_mut<'a>(&self, p: &'a mut Process) -> Option<&'a mut BreakSite> {
+        p.breaksite_by_id_mut(self.id)
+    }
+}
+
+impl BreakSiteId for &mut BreakSite {
+    fn find_breaksite<'a>(&self, p: &'a Process) -> Option<&'a BreakSite> {
+        p.breaksite_by_id(self.id)
+    }
+    fn find_breaksite_mut<'a>(&self, p: &'a mut Process) -> Option<&'a mut BreakSite> {
+        p.breaksite_by_id_mut(self.id)
+    }
+}
+
+impl BreakSiteId for usize {
+    fn find_breaksite<'a>(&self, p: &'a Process) -> Option<&'a BreakSite> {
+        p.breaksite_by_id(*self)
+    }
+    fn find_breaksite_mut<'a>(&self, p: &'a mut Process) -> Option<&'a mut BreakSite> {
+        p.breaksite_by_id_mut(*self)
+    }
+}
+impl BreakSiteId for VirtAddr {
+    fn find_breaksite<'a>(&self, p: &'a Process) -> Option<&'a BreakSite> {
+        p.breaksite_at_va(*self)
+    }
+    fn find_breaksite_mut<'a>(&self, p: &'a mut Process) -> Option<&'a mut BreakSite> {
+        p.breaksite_at_va_mut(*self)
+    }
 }
 
 impl Process {
@@ -119,6 +165,102 @@ impl Process {
 
     pub fn launch_noattach(cmd: &str) -> Result<Self> {
         return Self::launch_args(cmd, Vec::new(), false, None);
+    }
+
+    pub fn breaksites(&self) -> Vec::<&BreakSite> {
+        self.breaksites.values().collect()
+    }
+
+    pub fn breaksite_by_id(&self, id: usize) -> Option<&BreakSite> {
+        self.breaksites.get(&id)
+    }
+
+    pub fn breaksite_at_va(&self, va: VirtAddr) -> Option<&BreakSite> {
+        for bs in self.breaksites.values() {
+            if bs.addr() == va {
+                return Some(bs);
+            }
+        }
+        None
+    }
+
+    pub fn breaksite_by_id_mut(&mut self, id: usize) -> Option<&mut BreakSite> {
+        self.breaksites.get_mut(&id)
+    }
+
+    pub fn breaksite_at_va_mut(&mut self, va: VirtAddr) -> Option<&mut BreakSite> {
+        for bs in self.breaksites.values_mut() {
+            if bs.addr() == va {
+                return Some(bs);
+            }
+        }
+        None
+    }
+    
+    pub fn set_pc(&mut self, va: VirtAddr) {
+        self.write_reg(&RValue::from_id(va.0, RegisterId::rip));
+    }
+
+    pub fn get_pc(&self) -> VirtAddr {
+        self.registers.userdata.regs.rip.into()
+    }
+
+    pub fn enable_breaksite_by<T: BreakSiteId>(&mut self, id: T) -> Result<()> {
+        let pid = self.pid.clone();
+        let Some(bs) = id.find_breaksite_mut(self) else {
+            return error("could not find breaksite");
+        };
+        Self::enable_breaksite(pid, bs)
+    }
+
+    pub fn enable_breaksite(pid: Pid, bs: &mut BreakSite) -> Result<()> {
+        let Ok(data) = ptrace::read(pid, bs.addr().into()) else {
+            return error("could not PTRACE_PEEKDATA");
+        };
+        bs.saved_data = Some(data.to_le_bytes()[0..1].into());
+        let data = (data & !0xff) | INT3 as i64;
+        if ptrace::write(pid, bs.addr().into(), data).is_err() {
+            return error("could not PTRACE_POKEDATA");
+        }
+        bs.set_enabled();
+        Ok(())
+    }
+
+    pub fn disable_breaksite_by<T: BreakSiteId>(&mut self, id: T) -> Result<()> {
+        let pid = self.pid.clone();
+        let Some(bs) = id.find_breaksite_mut(self) else {
+            return error("could not find breaksite");
+        };
+        Self::disable_breaksite(pid, bs)
+    }
+
+    pub fn disable_breaksite(pid: Pid, bs: &mut BreakSite) -> Result<()> {
+        let Ok(mut data) = ptrace::read(pid, bs.addr().into()) else {
+            return error("could not PTRACE_PEEKDATA");
+        };
+        if let Some(saved) = &bs.saved_data {
+            if saved.len() > 8 {
+                return error(&format!("I have {} bytes of saved data; 8 should be the max", saved.len()));
+            }
+            for (i, byte) in saved.iter().enumerate() {
+                data = (data & !(0xff << (i*8))) | ((byte << (i*8)) as i64);
+            }
+        }
+        if ptrace::write(pid, bs.addr().into(), data).is_err() {
+            return error("could not PTRACE_POKEDATA");
+        }
+        bs.set_disabled();
+        Ok(())
+    }
+
+    pub fn create_breaksite(&mut self, va: VirtAddr) -> Result<usize> {
+        if let Some(existing) = self.breaksite_at_va(va) {
+            return error(&format!("breakpoint already exists at that address (id {})", existing.va));
+        }
+        let id = self.next_breaksite_id;
+        self.next_breaksite_id += 1;
+        self.breaksites.insert(id, BreakSite::new(id, va));
+        Ok(id)
     }
 
     pub fn launch_args(cmd: &str, args: Vec::<String>, attach: bool, stdout: Option<std::os::fd::RawFd>) -> Result<Self> {
@@ -150,6 +292,15 @@ impl Process {
                 }
             }
 
+            let Ok(pers) = personality::get() else {
+                exit_with_error(&mut pipe, "could not get process personality");
+                return error("could not get process personality");
+            };
+            let Ok(_) = personality::set(pers | personality::Persona::ADDR_NO_RANDOMIZE) else {
+                exit_with_error(&mut pipe, "could not set process personality to disable ASLR");
+                return error("could not set process personality");
+            };
+
             let mut args_cstr: Vec<CString> = args.iter().map(|s| CString::new(s.clone()).unwrap()).collect();
             args_cstr.insert(0, CString::new(cmd).unwrap());
             let mut args_ptr: Vec<*const i8> = args_cstr.iter().map(|s| s.as_c_str().as_ptr()).collect();
@@ -175,7 +326,9 @@ impl Process {
             autoterm: true,
             attached: attach,
             state: ProcessState::Running,
-            registers: Registers::empty()
+            registers: Registers::empty(),
+            breaksites: HashMap::new(),
+            next_breaksite_id: 0
         };
         if attach {
             let _ = p.wait_on_signal();
@@ -197,7 +350,9 @@ impl Process {
             autoterm: false,
             attached: true,
             state: ProcessState::Running,
-            registers: Registers::empty()
+            registers: Registers::empty(),
+            breaksites: HashMap::new(),
+            next_breaksite_id: 0
         };
         let _ = p.wait_on_signal();
         Ok(p)
@@ -215,6 +370,11 @@ impl Process {
         if self.attached && self.state == ProcessState::Stopped {
             let _ = self.read_all_registers();
         }
+
+        let instr_begin = self.get_pc() - 1;
+        if reason.info == StopInfo::Signal(signal::Signal::SIGTRAP) && self.breaksite_at_va(instr_begin).is_some() {
+            self.set_pc(instr_begin);
+        }
         Ok(reason)
     }
 
@@ -223,6 +383,17 @@ impl Process {
     }
 
     pub fn resume(&mut self) -> Result<()> {
+        let pc = self.get_pc();
+        if let Some(_) = self.breaksite_at_va_mut(pc) {
+            self.disable_breaksite_by(pc)?;
+            if ptrace::step(self.pid, None).is_err() {
+                return error("could not PTRACE_SINGLESTEP");
+            }
+            if wait::waitpid(self.pid, None).is_err() {
+                return error_os("could not waitpid");
+            }
+            self.enable_breaksite_by(pc)?;
+        }
         let res = ptrace::cont(self.pid, None);
         if res.is_err() {
             return error("could not resume");
@@ -258,7 +429,7 @@ impl Process {
         }
         
         for (i, id) in DR_IDS.iter().enumerate() {
-            let ri = register_by_id(id).unwrap();
+            let ri = register_by_id(*id).unwrap();
             if let Ok(val) = ptrace::read_user(self.pid, ri.offset as *mut libc::c_void) {
                 self.registers.userdata.u_debugreg[i] = val as u64;
             } else {
@@ -306,6 +477,40 @@ impl Process {
     pub fn regs(&self) -> &Registers {
         &self.registers
     }
+    
+    pub fn enable_all_breaksites(&mut self) -> usize {
+        let mut out = 0;
+        for (_, bs) in self.breaksites.iter_mut() {
+            if bs.enabled() && Self::disable_breaksite(self.pid, bs).is_ok() {
+                out += 1;
+            }
+        }
+        out
+    }
+
+    pub fn disable_all_breaksites(&mut self) -> usize {
+        let mut out = 0;
+        for (_, bs) in self.breaksites.iter_mut() {
+            if !bs.enabled() && Self::enable_breaksite(self.pid, bs).is_ok() {
+                out += 1;
+            }
+        }
+        out
+    }
+    
+    pub fn clear_all_breaksites(&mut self) -> usize {
+        let sz = self.breaksites.values().filter(|bs| bs.enabled()).count();
+        self.disable_all_breaksites();
+        self.breaksites.clear();
+        sz
+    }
+
+    pub fn clear_breaksite(&mut self, id: usize) -> Result<()> {
+        let Some(mut bs) = self.breaksites.remove(&id) else {
+            return error("could not find breaksite by id");
+        };
+        Self::disable_breaksite(self.pid, &mut bs)
+    }
 }
 
 impl Drop for Process {
@@ -315,14 +520,14 @@ impl Drop for Process {
         }
         if self.attached {
             if self.state == ProcessState::Running {
-                let _ = signal::kill(self.pid, Signal::SIGKILL);
+                let _ = signal::kill(self.pid, signal::Signal::SIGKILL);
                 let _ = wait::waitpid(self.pid, None);
             }
             let _ = ptrace::detach(self.pid, None);
-            let _ = signal::kill(self.pid, Signal::SIGCONT);
+            let _ = signal::kill(self.pid, signal::Signal::SIGCONT);
         }
         if self.autoterm {
-            let _ = signal::kill(self.pid, Signal::SIGKILL);
+            let _ = signal::kill(self.pid, signal::Signal::SIGKILL);
             let _ = wait::waitpid(self.pid, None);
         }
     }

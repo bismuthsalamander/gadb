@@ -2,12 +2,22 @@
 
 use std::fs::read_to_string;
 use std::fs;
+use std::io;
+use std::io::BufReader;
+use std::io::BufRead;
 use std::env;
+use std::fs::File;
 use std::path::PathBuf;
 use std::os::fd::AsRawFd;
+use std::process::Command;
+use std::process::Stdio;
+use std::thread;
+use std::time;
 use extended::Extended;
 
+use gadb::BreakSite;
 use gadb::RValue;
+use gadb::VirtAddr;
 use nix::{
     unistd::Pid,
     sys::signal
@@ -21,6 +31,8 @@ use gadb::{
     RegisterId,
     extend_vec
 };
+use nix::sys::ptrace;
+use regex::Regex;
 
 fn process_exists(pid: Pid) -> bool {
     let res = signal::kill(pid, None);
@@ -99,6 +111,11 @@ fn get_test_binary(name: &str) -> PathBuf {
     PathBuf::from(path_str)
 }
 
+fn re_wait(p: &mut Process) {
+    &p.resume();
+    &p.wait_on_signal();
+}
+
 #[test]
 fn write_register() {
     let test_binary = get_test_binary("reg_write");
@@ -109,21 +126,18 @@ fn write_register() {
     // Now you can use test_binary.as_path() to spawn the process
     let mut proc = Process::launch_args(&test_binary.into_os_string().into_string().unwrap(), vec![], true, Some(pipe.get_write().as_raw_fd())).unwrap();
     pipe.close_write();
-    proc.resume();
-    proc.wait_on_signal();
+    re_wait(&mut proc);
     let val = RValue::from_id(0x1badd00d2badf00du64, RegisterId::rsi);
     let str = format!("{:#x}", val);
     proc.write_reg(&val);
         // register_by_id(&RegisterId::rsi).unwrap(), val.into());
-    proc.resume();
-    proc.wait_on_signal();
+    re_wait(&mut proc);
     assert!(pipe.read_string().unwrap() == str);
 
     let val = RValue::from_id(0x1fa1afe12fa1afe1u64, RegisterId::mm0);
     let str = format!("{:#x}", val.read_as::<u64>());
     proc.write_reg(&val);
-    proc.resume();
-    proc.wait_on_signal();
+    re_wait(&mut proc);
     dbg!(&str);
     dbg!(&val.ri.id);
     let out = pipe.read_string().unwrap();
@@ -133,8 +147,7 @@ fn write_register() {
     let val = RValue::from_id(76.54, RegisterId::xmm0);
     let from_val = format!("{0:.2}", val.read_as::<f64>());
     proc.write_reg(&val);
-    proc.resume();
-    proc.wait_on_signal();
+    re_wait(&mut proc);
     let from_child = pipe.read_string().unwrap();
     dbg!(&from_child);
     dbg!(&from_val);
@@ -153,8 +166,7 @@ fn write_register() {
     proc.write_reg(&RValue::from_id(ftw, RegisterId::ftw));
     let res = proc.get_fpregs().unwrap();
     println!("cwd: {0:b}\nftw: {1:b}\nst0: {2:x}\nst1: {3:x}\nst2: {4:x}\nst3: {5:x}", res.swd, res.ftw, res.st_space[0], res.st_space[1], res.st_space[2], res.st_space[3]);
-    proc.resume();
-    proc.wait_on_signal();
+    re_wait(&mut proc);
     let out = pipe.read_string().unwrap();
     dbg!(&out);
     dbg!(&str);
@@ -170,32 +182,109 @@ fn read_register() {
 
     let mut proc = Process::launch_args(&test_binary.into_os_string().into_string().unwrap(), vec![], true, Some(pipe.get_write().as_raw_fd())).unwrap();
     pipe.close_write();
-    proc.resume();
-    proc.wait_on_signal();
+    re_wait(&mut proc);
 
     let magic_int: u64 = 0x00c0ff331deadb01;
     let magic_double: f64 = 135.79;
 
-    assert!(proc.regs().read_as_id::<u64>(&RegisterId::r13) == magic_int);
+    assert!(proc.regs().read_as_id::<u64>(RegisterId::r13) == magic_int);
 
-    proc.resume();
-    proc.wait_on_signal();
-    assert!(proc.regs().read_as_id::<u8>(&RegisterId::r13b) == 42);
+    re_wait(&mut proc);
+    assert!(proc.regs().read_as_id::<u8>(RegisterId::r13b) == 42);
 
-    proc.resume();
-    proc.wait_on_signal();
-    assert!(proc.regs().read_as_id::<u64>(&RegisterId::rbx) == 21 << 8);
+    re_wait(&mut proc);
+    assert!(proc.regs().read_as_id::<u64>(RegisterId::rbx) == 21 << 8);
 
-    proc.resume();
-    proc.wait_on_signal();
-    assert!(proc.regs().read_as_id::<u64>(&RegisterId::st0) == 0xba5eba11);
+    re_wait(&mut proc);
+    assert!(proc.regs().read_as_id::<u64>(RegisterId::st0) == 0xba5eba11);
 
-    proc.resume();
-    proc.wait_on_signal();
-    assert!(proc.regs().read_as_id::<[u8; 8]>(&RegisterId::xmm0) == magic_double.to_le_bytes());
+    re_wait(&mut proc);
+    assert!(proc.regs().read_as_id::<[u8; 8]>(RegisterId::xmm0) == magic_double.to_le_bytes());
 
-    proc.resume();
-    proc.wait_on_signal();
+    re_wait(&mut proc);
     let bytes = Into::<Extended>::into(magic_double).to_le_bytes();
-    assert!(proc.regs().read_as_id::<[u8;16]>(&RegisterId::st0)[..10] == bytes);
+    assert!(proc.regs().read_as_id::<[u8;16]>(RegisterId::st0)[..10] == bytes);
+}
+
+fn parse_hex(s: &str) -> Result<u64> {
+    match u64::from_str_radix(s, 16) {
+        Ok(val) => Ok(val),
+        Err(_) => error("could not parse value")
+    }
+}
+fn find_memory_offset(elf: &str, file_addr: VirtAddr) -> Result<VirtAddr> {
+    // Read ELF to translate file offset to memory offset
+    let mut cmd = Command::new("readelf")
+        .arg("-WS")
+        .arg(elf)
+        .stdout(Stdio::piped())
+        .spawn();
+    let Ok(mut cmd) = cmd else {
+        return error("could not launch readelf");
+    };
+
+    let stdout = cmd.stdout.take()
+        .expect("Child process stdout handle was not configured");
+
+    let re = Regex::new(r"PROGBITS\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)").unwrap();
+    let reader = BufReader::new(stdout);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => continue
+        };
+        let Some(cap) = re.captures(&line) else {
+            continue;
+        };
+        let (_, [addr, off, size]) = cap.extract();
+        let sec_addr = parse_hex(addr)?;
+        let sec_off = parse_hex(off)?;
+        let sec_size = parse_hex(size)?;
+        if file_addr.0 >= sec_addr && file_addr.0 < sec_addr + sec_size {
+            return Ok((file_addr + sec_addr - sec_off).into())
+        }
+    }
+    return error("could not parse readelf output");
+}
+
+fn find_memory_address(elf: &str, pid: Pid, file_addr: VirtAddr) -> Result<VirtAddr> {
+    let mem_off = find_memory_offset(elf, file_addr)?;
+    // Read proc map to find memory address containing this offset
+    let re = Regex::new(r"^\s*([0-9a-f]+)-([0-9a-f]+)\s+..(.).\s+([0-9a-f]+)\s+").unwrap();
+    let path = format!("/proc/{}/maps", pid);
+    let Ok(data) = read_to_string(&path) else {
+        return error("could not open procmap");
+    };
+    for line in data.lines() {
+        let Some(cap) = re.captures(&line) else {
+            continue;
+        };
+        let (start, end, x, offset) = (
+            parse_hex(&cap[1])?,
+            parse_hex(&cap[2])?,
+            &cap[3],
+            parse_hex(&cap[4])?
+        );
+        let size = end - start;
+        if mem_off.0 >= offset && mem_off.0 < (offset + size) {
+            return Ok((mem_off - offset) + start);
+        }
+    }
+    return error("could not find memory address; just not found!");
+}
+
+#[test]
+fn basic_breakpoints() {
+    let test_binary = get_test_binary("hello_world");
+    assert!(test_binary.exists(), "Test binary not found at {:?}", test_binary);
+
+    let mut pipe = Pipe::pipe(false).unwrap();
+
+    let mut proc = Process::launch_args(test_binary.to_str().unwrap(), vec![], true, Some(pipe.get_write().as_raw_fd())).unwrap();
+    pipe.close_write();
+    let bp_file_addr: VirtAddr = 0x115b.into();
+    let bp_mem_addr = find_memory_address(test_binary.to_str().unwrap(), proc.pid, bp_file_addr).unwrap();
+    let bpid = proc.create_breaksite(bp_mem_addr).unwrap();
+    proc.enable_breaksite_by(bpid);
+    assert!(bp_mem_addr == proc.get_pc());
 }

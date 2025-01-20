@@ -57,7 +57,7 @@ impl<T: RegType> PartialEq<T> for RValue {
 impl std::fmt::Display for RValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.ri.format, self.ri.size) {
-            (Uint, _)        => write!(f, "{}", unsafe { self.val.u64 } ),
+            (Uint, _)        => write!(f, "{:#x}", unsafe { self.val.u64 } ),
             (Double, 4)      => write!(f, "{}", unsafe { self.val.f32 } ),
             (Double, 8)      => write!(f, "{}", unsafe { self.val.f64 } ),
             (LongDouble, 16) => {
@@ -145,7 +145,7 @@ impl RValue {
     pub fn from_id<T: RegType>(t: T, rid: RegisterId) -> Self {
         Self {
             val: ValUnion::from(t),
-            ri: register_by_id(&rid).unwrap()
+            ri: register_by_id(rid).unwrap()
         }
     }
 
@@ -227,7 +227,7 @@ impl Registers {
         }
     }
     
-    pub fn read_as_id<T: RegType>(&self, rid: &RegisterId) -> T {
+    pub fn read_as_id<T: RegType>(&self, rid: RegisterId) -> T {
         let ri = register_by_id(rid).unwrap();
         self.read_as(ri)
     }
@@ -264,9 +264,8 @@ impl Registers {
 
     pub fn get_clong_at(&self, offset: usize) -> i64 {
         unsafe {
-            let ptr: *const user = &self.userdata;
-            let ptr: *const u8 = ptr as *const u8;
-            let ptr = ptr.add(offset);
+            let mut ptr: *const u8 = (&self.userdata as *const user) as *const u8;
+            ptr = ptr.add(offset);
             let ptr: *const i64 = ptr as *const i64;
             return *ptr;
         }

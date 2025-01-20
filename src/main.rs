@@ -1,3 +1,4 @@
+use gadb::StopPoint;
 use copperline::Copperline;
 use gadb::{
     error, parse_float, parse_u64, parse_vec, register_by_name, Process, RValue, RegisterFormat, RegisterType, Result, REGISTER_INFOS
@@ -32,9 +33,9 @@ fn print_help(args: &Vec<&str>) {
 
     continue
     register
-");
+    breakpoint");
     } else {
-        if "register".starts_with(args[1]) {
+        if "register".starts_with(args[0]) {
             println!("Usage: register (subcommand)
 
 Available subcommands:
@@ -43,6 +44,16 @@ Available subcommands:
     read <register>
     read all
     write <register> <value>");
+        } else if "breakpoint".starts_with(args[0]) {
+            println!("Usage: breakpoint (subcommand)
+
+Available subcommands:
+
+    list
+    set <addr>
+    enable <addr|id>
+    disable <addr|id>
+    clear <addr|id>");
         }
     }
 }
@@ -75,8 +86,7 @@ fn handle_register_command(p: &mut Process, args: &Vec<&str>) {
             return println!("Unrecognized register {}", args[2]);
         };
 
-
-        // TODO: this repetition will all go away after I fix how ValUnion is used
+        //TODO: move this to parsing?
         let val = match ri.format {
             RegisterFormat::Uint => {
                 let Ok(v) = parse_u64(&args[3]) else {
@@ -112,6 +122,113 @@ fn handle_register_command(p: &mut Process, args: &Vec<&str>) {
     }
 }
 
+fn handle_breakpoint_command(p: &mut Process, args: &Vec<&str>) {
+    let max_id = p.breaksites().iter().map(|b| b.id).max().unwrap_or(0);
+    if args.len() == 2 {
+        if let Ok(_) = parse_u64(args[1]) {
+            return handle_breakpoint_command(p, &vec![args[0], "set", args[1]]);
+        }
+    }
+    if "list".starts_with(args[1]) || "show".starts_with(args[1]) {
+        let mut bs = p.breaksites();
+        if bs.len() == 0 {
+            println!("No breakpoints created");
+            return;
+        }
+        bs.sort_by_key(|k| k.addr());
+        let top_id = bs.iter().map(|b| b.id).max().unwrap();
+        let len = format!("{}", top_id).len();
+        println!("Breakpoints:");
+        for bp in bs {
+            println!("{:>len$}:\t{:#x}", bp.id, bp.addr());
+        }
+    } else if args.len() < 3 {
+        return print_help(args);
+    } else if "set".starts_with(args[1]) {
+        let Ok(val) = parse_u64(args[2]) else {
+            println!("could not parse address");
+            return;
+        };
+        let res = p.create_breaksite(val.into());
+        let Ok(id) = res else {
+            println!("{}", res.err().unwrap());
+            return;
+        };
+        let res = p.enable_breaksite_by(id);
+        let Ok(_) = res else {
+            println!("{}", res.err().unwrap());
+            return;
+        };
+        println!("created breaksite {}", id);
+    } else if "enable".starts_with(args[1]) || "disable".starts_with(args[1]) {
+        let enable = "enable".starts_with(args[1]);
+        if args[2] == "all" {
+            if enable {
+                p.enable_all_breaksites();
+            } else {
+                p.disable_all_breaksites();
+            }
+            return;
+        }
+
+        let Ok(val) = parse_u64(args[2]) else {
+            println!("could not parse address or ID");
+            return;
+        };
+        let id = {
+            let bs = if val as usize > max_id {
+                p.breaksite_at_va(val.into())
+            } else {
+                p.breaksite_by_id(val as usize)
+            };
+            let Some(bs) = bs else {
+                println!("could not find specified breakpoint");
+                return;
+            };
+            if enable == bs.enabled() {
+                println!("breaksite already {}abled", if enable { "en" } else { "dis" });
+                return;
+            }
+            bs.id
+        };
+        if enable {
+            match p.enable_breaksite_by(id) {
+                Err(e) => println!("{}", e),
+                Ok(_) => println!("breakpoint {} enabled", id)
+            }
+        } else {
+            match p.disable_breaksite_by(id) {
+                Err(e) => println!("{}", e),
+                Ok(_) => println!("breakpoint {} disabled", id),
+            }
+        }
+    } else if "clear".starts_with(args[1]) {
+        if args[2] == "all" {
+            p.clear_all_breaksites();
+            return;
+        }
+        let Ok(val) = parse_u64(args[2]) else {
+            println!("could not parse address or ID");
+            return;
+        };
+        let id = {
+            let Some(bs) = (if val > max_id as u64 {
+                p.breaksite_at_va(val.into())
+            } else {
+                p.breaksite_by_id(val as usize)
+            }) else {
+                println!("could not find breakpoint");
+                return;
+            };
+            bs.id
+        };
+        let res = p.clear_breaksite(id);
+        if res.is_err() {
+            println!("{}", res.err().unwrap());
+        }
+    }
+}
+
 fn handle_command(p: &mut Process, cmd: &str) -> Result<()> {
     let split = cmd.split(' ');
     let args: Vec<&str> = split.collect();
@@ -131,6 +248,8 @@ fn handle_command(p: &mut Process, cmd: &str) -> Result<()> {
         print_help(&args);
     } else if "registers".starts_with(command) {
         handle_register_command(p, &args);
+    } else if "breakpoint".starts_with(command) {
+        handle_breakpoint_command(p, &args);
     } else {
         return error(&format!("unrecognized command: {}", command));
     }

@@ -5,13 +5,15 @@ mod register_info;
 mod registers;
 mod process;
 mod parsing;
+mod breakpoints;
 
 pub use {
     pipe::*,
     register_info::*,
     registers::*,
     process::*,
-    parsing::*
+    parsing::*,
+    breakpoints::*,
 };
 
 pub type Result<T> = std::result::Result<T, GadbErr>;
