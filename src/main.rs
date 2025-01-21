@@ -1,4 +1,6 @@
-use gadb::StopPoint;
+use std::cmp::min;
+
+use gadb::{parse_hex_vec, StopPoint};
 use copperline::Copperline;
 use gadb::{
     error, parse_float, parse_u64, parse_vec, register_by_name, Process, RValue, RegisterFormat, RegisterType, Result, REGISTER_INFOS
@@ -32,6 +34,7 @@ fn print_help(args: &Vec<&str>) {
         println!("Available comamnds:
 
     continue
+    memory
     register
     breakpoint");
     } else {
@@ -40,7 +43,6 @@ fn print_help(args: &Vec<&str>) {
 
 Available subcommands:
 
-    read
     read <register>
     read all
     write <register> <value>");
@@ -54,7 +56,78 @@ Available subcommands:
     enable <addr|id>
     disable <addr|id>
     clear <addr|id>");
+        } else if "memory".starts_with(args[0]) {
+            println!("Usage: memory (subcommand)
+
+Available subcommands:
+
+    read <addr> <numbytes>
+    write <addr> <data>");
         }
+    }
+}
+
+fn handle_memory_command(p: &mut Process, args: &Vec<&str>) {
+    if args.len() < 3 {
+        return print_help(args);
+    }
+    if "read".starts_with(args[1]) {
+        let numbytes: usize = if args.len() == 3 {
+            32
+        } else {
+            match parse_u64(args[3]) {
+                Ok(n) => n as usize,
+                Err(e) => {
+                    println!("{}", e);
+                    return;
+                },
+            }
+        };
+        let Ok(addr) = parse_u64(args[2]) else {
+            println!("could not parse address");
+            return;
+        };
+
+        let data = p.read_memory(addr.into(), numbytes);
+        match data {
+            Ok(data) => {
+                let page_size = 16;
+                let mut remaining = data.len();
+                let mut idx: usize = 0;
+                while remaining > 0 {
+                    print!("{:#016x}:", addr + idx as u64);
+                    let sz = min(page_size, remaining);
+                    for val in &data[idx..idx+sz] {
+                        print!(" {:02x}", val);
+                    }
+                    print!("\n");
+                    remaining -= sz;
+                    idx += sz;
+                }
+            },
+            Err(e) => println!("{}", e),
+        }
+        return;
+    } else if "write".starts_with(args[1]) {
+        let Ok(addr) = parse_u64(args[2]) else {
+            println!("could not parse address");
+            return;
+        };
+
+        let mut bytes = parse_hex_vec(args[3]);
+        let bytes = match bytes {
+            Ok(b) => b,
+            Err(e) => {
+                println!("{}", e);
+                return;
+            }
+        };
+        
+        let res = p.write_memory(addr.into(), bytes);
+        if res.is_err() {
+            println!("{}", res.err().unwrap());
+        }
+        return;
     }
 }
 
@@ -250,6 +323,8 @@ fn handle_command(p: &mut Process, cmd: &str) -> Result<()> {
         handle_register_command(p, &args);
     } else if "breakpoint".starts_with(command) {
         handle_breakpoint_command(p, &args);
+    } else if "memory".starts_with(command) {
+        handle_memory_command(p, &args);
     } else {
         return error(&format!("unrecognized command: {}", command));
     }

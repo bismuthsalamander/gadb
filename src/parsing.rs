@@ -3,6 +3,35 @@ use crate::{
     error
 };
 
+fn remove_first_and_last(s: &str) -> &str {
+    let mut chars = s.chars();
+    chars.next();
+    chars.next_back();
+    chars.as_str()
+}
+
+pub fn parse_hex_vec(s: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::<u8>::new();
+    if s.chars().nth(0) != Some('[') ||
+        s.chars().nth(s.len()-1) != Some(']') {
+        return error("could not parse; expected [0xaa,0xbb,...]");
+    }
+    
+    let str = remove_first_and_last(s).to_string();
+    let parts = str.split(",");
+    for byte in parts {
+        if !byte.starts_with("0x") {
+            return error(&format!("could not parse byte {} (expecting hex value with 0x prefix)", byte));
+        }
+        let res = u8::from_str_radix(&byte[2..byte.len()], 16);
+        if res.is_err() {
+            return error(&format!("could not parse byte {}", byte));
+        }
+        bytes.push(res.unwrap());
+    }
+    Ok(bytes)
+}
+
 pub fn parse_vec<const N: usize>(s: &str) -> Result<[u8; N]> {
     if s.len() == 0 || !s.starts_with('[') || !s.ends_with(']') {
         return error("could not parse vec");

@@ -57,6 +57,22 @@ impl std::ops::Sub::<u64> for VirtAddr {
     }
 }
 
+impl std::ops::Add::<usize> for VirtAddr {
+    type Output = Self;
+
+    fn add(self, rhs: usize) -> Self::Output {
+        Self(self.0 + rhs as u64)
+    }
+}
+
+impl std::ops::Sub::<usize> for VirtAddr {
+    type Output = Self;
+
+    fn sub(self, rhs: usize) -> Self::Output {
+        Self(self.0 - rhs as u64)
+    }
+}
+
 impl Into::<nix::sys::ptrace::AddressType> for VirtAddr {
     fn into(self) -> nix::sys::ptrace::AddressType {
         self.0 as *mut std::ffi::c_void

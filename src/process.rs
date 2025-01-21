@@ -14,6 +14,7 @@ use nix::{
     sys::personality,
     sys::signal,
     sys::ptrace,
+    sys::uio,
     unistd::Pid,
 };
 
@@ -24,8 +25,10 @@ use libc::{
     user_fpregs_struct
 };
 
+use std::cmp::min;
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::io::IoSliceMut;
 use std::process::exit;
 
 const INT3: u8 = 0xcc;
@@ -371,7 +374,7 @@ impl Process {
             let _ = self.read_all_registers();
         }
 
-        let instr_begin = self.get_pc() - 1;
+        let instr_begin = self.get_pc() - 1u64;
         if reason.info == StopInfo::Signal(signal::Signal::SIGTRAP) && self.breaksite_at_va(instr_begin).is_some() {
             self.set_pc(instr_begin);
         }
@@ -510,6 +513,113 @@ impl Process {
             return error("could not find breaksite by id");
         };
         Self::disable_breaksite(self.pid, &mut bs)
+    }
+/*
+    fn split_into_slices<T>(slice: &mut [T], slice_size: usize) -> Vec<&mut [T]> {
+        let (first, rest) = slice.split_at_mut(slice_size);
+        let mut result = vec![first];
+        result.extend(Self::split_into_slices(rest, n - 1));
+        result
+    }
+
+    
+    pub fn read_memory(
+        &self,
+        start: VirtAddr,
+        count: usize
+    ) -> Result<Vec<u8>> {
+        // Create a buffer to hold all the data
+        let mut buffer = vec![0u8; count];
+        
+        // Create local iovecs using our safe split function
+        let local_slices = Self::split_into_slices(&mut buffer, 8);
+        let local_iovecs: Vec<IoSliceMut> = local_slices
+            .into_iter()
+            .map(|slice| IoSliceMut::new(slice))
+            .collect();
+    
+        // Create remote iovecs
+        let remote_iovecs: Vec<uio::RemoteIoVec> = remote_addresses
+            .iter()
+            .map(|&addr| uio::RemoteIoVec {
+                base: addr,
+                len: chunk_size,
+            })
+            .collect();
+    
+        // Perform the read
+        let bytes_read = uio::process_vm_readv(
+            self.pid,
+            &local_iovecs,
+            &remote_iovecs,
+        )?;
+    
+        if bytes_read != total_size {
+            return error("incomplete read");
+        }
+    
+        Ok(buffer)
+    }
+*/
+
+    pub fn read_memory(&self, start: VirtAddr, count: usize) -> Result<Vec::<u8>> {
+        unsafe {
+            let page_size = 0x1000usize;
+            let mut remaining = count;
+            let mut ptr = start.0 as usize;
+            let mut out: Vec::<u8> = vec![0u8; count];
+            let mut local_iovecs: Vec::<IoSliceMut> = vec![IoSliceMut::new(&mut out[..])];
+            let mut remote_iovecs = Vec::<uio::RemoteIoVec>::new();
+            while remaining > 0 {
+                let page = min(remaining, page_size);
+                remote_iovecs.push(uio::RemoteIoVec {
+                    base: ptr,
+                    len: page
+                });
+                ptr += page;
+                remaining -= page;
+            }
+            let res = uio::process_vm_readv(
+                self.pid,
+                &mut local_iovecs[..],
+                &remote_iovecs[..]
+            );
+            if let Ok(ct) = res {
+                if ct > out.len() {
+                    out.truncate(ct);
+                }
+                return Ok(out)
+            }
+            return error(&format!("{}", res.err().unwrap()));
+        }
+    }
+
+    pub fn write_memory(&self, start: VirtAddr, data: Vec::<u8>) -> Result<()> {
+        let mut remaining = data.len();
+        let mut vec_idx = 0usize;
+        while remaining > 0 {
+            let write_sz = min(8, remaining);
+            let mut bytes = [0u8; 8];
+            if write_sz < 8 {
+                let out = self.read_memory((start + vec_idx).into(), 8);
+                if out.is_err() {
+                    return error(&format!("{}", out.err().unwrap()));
+                }
+                &mut bytes[0..8].copy_from_slice(&out.unwrap()[0..8]);
+            }
+            &mut bytes[0..write_sz].copy_from_slice(&data[vec_idx..vec_idx+write_sz]);
+            let res = ptrace::write(
+                self.pid,
+                (start + vec_idx).into(),
+                i64::from_le_bytes(bytes)
+            );
+            if res.is_err() {
+                return error(&format!("{}", res.err().unwrap()));
+            }
+            vec_idx += write_sz;
+            remaining -= write_sz;
+        }
+        Ok(())
     }
 }
 
