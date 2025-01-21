@@ -286,5 +286,36 @@ fn basic_breakpoints() {
     let bp_mem_addr = find_memory_address(test_binary.to_str().unwrap(), proc.pid, bp_file_addr).unwrap();
     let bpid = proc.create_breaksite(bp_mem_addr).unwrap();
     proc.enable_breaksite_by(bpid);
+    re_wait(&mut proc);
     assert!(bp_mem_addr == proc.get_pc());
+}
+
+#[test]
+
+fn memory_read() {
+    let test_binary = get_test_binary("memory");
+    assert!(test_binary.exists(), "Test binary not found at {:?}", test_binary);
+
+    let mut pipe = Pipe::pipe(false).unwrap();
+
+    let mut proc = Process::launch_args(test_binary.to_str().unwrap(), vec![], true, Some(pipe.get_write().as_raw_fd())).unwrap();
+    pipe.close_write();
+    re_wait(&mut proc);
+
+    let val = 0x1badd00d2badf00du64;
+    let data = pipe.read().unwrap();
+    let addr: u64 = u64::from_le_bytes(data.try_into().unwrap());
+    let mem = proc.read_memory(addr.into(), 8).unwrap();
+    assert!(TryInto::<[u8; 8]>::try_into(mem).unwrap() == val.to_le_bytes());
+
+    re_wait(&mut proc);
+    let data = pipe.read().unwrap();
+    let addr: u64 = u64::from_le_bytes(data.try_into().unwrap());
+    let str = String::from("Hello, gadb");
+    proc.write_memory(addr.into(), str.as_bytes().to_vec());
+
+    re_wait(&mut proc);
+
+    let data = pipe.read_string().unwrap();
+    assert!(data == str);
 }

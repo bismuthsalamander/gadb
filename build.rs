@@ -5,12 +5,10 @@ use std::path::PathBuf;
 
 
 fn main() {
-    println!("cargo:rerun-if-changed=src/reg_write.s");
     build("src/targets/reg_write.s", "reg_write");
-    println!("cargo:rerun-if-changed=src/reg_read.s");
     build("src/targets/reg_read.s", "reg_read");
-    println!("cargo:rerun-if-changed=src/hello_world.c");
-    build("src/targets/hello_world.c", "hello_world")
+    build("src/targets/hello_world.c", "hello_world");
+    build("src/targets/memory.c", "memory");
 }
 
 fn build(infile: &str, outfile: &str) {
@@ -30,4 +28,5 @@ fn build(infile: &str, outfile: &str) {
         out_dir.join(path_file),
         exe_file.display().to_string(),
     );
+    println!("cargo:rerun-if-changed={}", infile);
 }
