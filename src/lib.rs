@@ -6,6 +6,7 @@ mod registers;
 mod process;
 mod parsing;
 mod breakpoints;
+mod disassembler;
 
 pub use {
     pipe::*,
@@ -14,6 +15,7 @@ pub use {
     process::*,
     parsing::*,
     breakpoints::*,
+    disassembler::*
 };
 
 pub type Result<T> = std::result::Result<T, GadbErr>;

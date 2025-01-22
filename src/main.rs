@@ -3,7 +3,10 @@ use std::cmp::min;
 use gadb::{parse_hex_vec, StopPoint};
 use copperline::Copperline;
 use gadb::{
-    error, parse_float, parse_u64, parse_vec, register_by_name, Process, RValue, RegisterFormat, RegisterType, Result, REGISTER_INFOS
+    error, parse_float, parse_u64, parse_vec, register_by_name, Process, RValue, RegisterFormat, RegisterType, Result, REGISTER_INFOS,
+    disassemble,
+    Instruction,
+    VirtAddr
 };
 
 fn usage() {
@@ -36,7 +39,8 @@ fn print_help(args: &Vec<&str>) {
     continue
     memory
     register
-    breakpoint");
+    breakpoint
+    disassemble");
     } else {
         if "register".starts_with(args[0]) {
             println!("Usage: register (subcommand)
@@ -114,20 +118,15 @@ fn handle_memory_command(p: &mut Process, args: &Vec<&str>) {
             return;
         };
 
-        let mut bytes = parse_hex_vec(args[3]);
-        let bytes = match bytes {
+        let bytes = match parse_hex_vec(args[3]) {
             Ok(b) => b,
-            Err(e) => {
-                println!("{}", e);
-                return;
-            }
+            Err(e) => return println!("{}", e)
         };
         
-        let res = p.write_memory(addr.into(), bytes);
-        if res.is_err() {
-            println!("{}", res.err().unwrap());
+        match p.write_memory(addr.into(), bytes) {
+            Ok(_) => {},
+            Err(e) => println!("{}", e)
         }
-        return;
     }
 }
 
@@ -195,6 +194,48 @@ fn handle_register_command(p: &mut Process, args: &Vec<&str>) {
     }
 }
 
+fn handle_disassemble_command(p: &mut Process, args: &Vec<&str>) {
+    let mut addr = p.get_pc();
+    let mut n_inst: usize = 20;
+    if args.len() > 1 {
+        if args.len() == 2 {
+            //TODO: macro for this
+            let val = match parse_u64(args[1]) {
+                Ok(v) => v,
+                Err(e) => return println!("{}", e)
+            };
+            if val > 1000 {
+                addr = val.into();
+            } else {
+                n_inst = val as usize;
+            }
+        } else {
+            addr = if args[2] == "rip" {
+                addr
+            } else {
+                match parse_u64(args[1]) {
+                    Ok(v) => v.into(),
+                    Err(e) => return println!("{}", e),
+                }
+            };
+            n_inst = match parse_u64(args[2]) {
+                Ok(v) => v,
+                Err(e) => return println!("{}", e)
+            } as usize;
+        }
+    }
+    print_disassembly(p, addr, Some(n_inst));
+}
+
+fn print_disassembly(p: &mut Process, addr: VirtAddr, n_inst: Option<usize>) {
+    let instructions = match disassemble(p, addr, n_inst) {
+        Ok(inst) => inst,
+        Err(e) => return println!("{}", e)
+    };
+    for inst in instructions.iter() {
+        println!("{:#x}: {}", inst.va, &inst.text);
+    }
+}
 fn handle_breakpoint_command(p: &mut Process, args: &Vec<&str>) {
     let max_id = p.breaksites().iter().map(|b| b.id).max().unwrap_or(0);
     if args.len() == 2 {
@@ -313,7 +354,10 @@ fn handle_command(p: &mut Process, cmd: &str) -> Result<()> {
         p.resume()?;
         let reason = p.wait_on_signal();
         if let Ok(reason) = reason {
-            println!("{}", &reason);
+            println!("{} at {:#x}", &reason, p.get_pc());
+            if reason.is_signal() {
+                print_disassembly(p, p.get_pc(), Some(5));
+            }
         } else {
             return Err(reason.err().unwrap());
         }
@@ -325,6 +369,8 @@ fn handle_command(p: &mut Process, cmd: &str) -> Result<()> {
         handle_breakpoint_command(p, &args);
     } else if "memory".starts_with(command) {
         handle_memory_command(p, &args);
+    } else if "disassemble".starts_with(command) {
+        handle_disassemble_command(p, &args);
     } else {
         return error(&format!("unrecognized command: {}", command));
     }

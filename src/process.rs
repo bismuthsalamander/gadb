@@ -58,6 +58,21 @@ pub enum StopInfo {
     ExitCode(i32)
 }
 
+impl StopReason {
+    pub fn is_signal(&self) -> bool {
+        match self.info {
+            StopInfo::Signal(_) => true,
+            _ => false
+        }
+    }
+    pub fn is_exit(&self) -> bool {
+        match self.info {
+            StopInfo::ExitCode(_) => true,
+            _ => false
+        }
+    }
+}
+
 impl std::fmt::Display for StopInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -514,53 +529,6 @@ impl Process {
         };
         Self::disable_breaksite(self.pid, &mut bs)
     }
-/*
-    fn split_into_slices<T>(slice: &mut [T], slice_size: usize) -> Vec<&mut [T]> {
-        let (first, rest) = slice.split_at_mut(slice_size);
-        let mut result = vec![first];
-        result.extend(Self::split_into_slices(rest, n - 1));
-        result
-    }
-
-    
-    pub fn read_memory(
-        &self,
-        start: VirtAddr,
-        count: usize
-    ) -> Result<Vec<u8>> {
-        // Create a buffer to hold all the data
-        let mut buffer = vec![0u8; count];
-        
-        // Create local iovecs using our safe split function
-        let local_slices = Self::split_into_slices(&mut buffer, 8);
-        let local_iovecs: Vec<IoSliceMut> = local_slices
-            .into_iter()
-            .map(|slice| IoSliceMut::new(slice))
-            .collect();
-    
-        // Create remote iovecs
-        let remote_iovecs: Vec<uio::RemoteIoVec> = remote_addresses
-            .iter()
-            .map(|&addr| uio::RemoteIoVec {
-                base: addr,
-                len: chunk_size,
-            })
-            .collect();
-    
-        // Perform the read
-        let bytes_read = uio::process_vm_readv(
-            self.pid,
-            &local_iovecs,
-            &remote_iovecs,
-        )?;
-    
-        if bytes_read != total_size {
-            return error("incomplete read");
-        }
-    
-        Ok(buffer)
-    }
-*/
 
     pub fn read_memory(&self, start: VirtAddr, count: usize) -> Result<Vec::<u8>> {
         unsafe {
@@ -592,6 +560,19 @@ impl Process {
             }
             return error(&format!("{}", res.err().unwrap()));
         }
+    }
+
+    pub fn read_memory_clean(&self, start: VirtAddr, count: usize) -> Result<Vec<u8>> {
+        let mut mem = self.read_memory(start, count)?;
+        for bp in self.breaksites.values() {
+            if bp.enabled() && bp.in_range(start, start + mem.len()) {
+                if let Some(data) = &bp.saved_data {
+                    let slice_start = (bp.va - start) as usize;
+                    &mut mem[slice_start..slice_start + data.len()].copy_from_slice(&data[..]);
+                }                
+            }
+        }
+        Ok(mem)
     }
 
     pub fn write_memory(&self, start: VirtAddr, data: Vec::<u8>) -> Result<()> {
